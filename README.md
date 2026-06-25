@@ -1,13 +1,27 @@
+English | [Русский](README.ru.md)
+
 # vps-bootstrap
 
 > One idempotent Bash script to take a **fresh Ubuntu/Debian VPS** from
 > "root password over port 22" to a sane, hardened baseline — a non-root sudo
 > user, key-only SSH, a firewall, brute-force protection, automatic security
-> updates, swap, kernel hardening, and an optional web stack.
+> updates, swap, kernel hardening, and an optional web/app stack — plus a
+> read-only **audit mode** to confirm (or re-check) a box's state any time.
 
 Re-running the script is always safe: **every action checks current state
 before changing anything**. No half-applied state, no duplicate firewall rules,
 no clobbered config on the second run.
+
+```bash
+# See what's planned, change nothing
+sudo bash bootstrap.sh --dry-run
+
+# Harden the box
+sudo bash bootstrap.sh
+
+# Re-check the box's state any time — read-only, changes nothing
+sudo bash bootstrap.sh --verify     # or: sudo bash harden-check.sh
+```
 
 ---
 
@@ -44,8 +58,57 @@ Each step is a self-contained function and is **idempotent**:
 | 10 | **nginx** *(optional)* | install + enable + start | skips install/start if present/running |
 | 11 | **certbot** *(optional)* | install certbot (+ nginx plugin) for Let's Encrypt | only installs missing packages |
 | 12 | **Docker** *(optional)* | official Docker CE repo + add user to `docker` group | skips if Docker already installed |
+| 13 | **Node.js** *(optional)* | official NodeSource repo, pinned major (`NODE_VERSION`) | skips if the requested major is already installed |
+| 14 | **Monitoring** *(optional)* | `netdata` (bound to localhost) or `glances` | skips if already installed |
 
 It finishes with a **summary** and a **post-run checklist**.
+
+---
+
+## Audit mode (`--verify`) — check, don't change
+
+Run a **read-only** health/hardening audit at any time. It inspects the same
+areas the script hardens — SSH config, UFW, fail2ban, swap, automatic updates,
+sysctl — and prints a `PASS` / `WARN` / `FAIL` report **without changing
+anything**. Use it right after a run, on a schedule (cron), or in CI to catch
+config drift.
+
+```bash
+sudo bash bootstrap.sh --verify        # or the friendly wrapper:
+sudo bash harden-check.sh
+```
+
+Example output:
+
+```
+===== SSH =====
+  [PASS] Port                   2222 (moved off 22)
+  [PASS] PermitRootLogin        no
+  [PASS] PasswordAuthentication no (key-only)
+  [PASS] Drop-in present        /etc/ssh/sshd_config.d/99-vps-bootstrap.conf
+
+===== Firewall (UFW) =====
+  [PASS] UFW status             active
+  [ -- ] Allowed                2222/tcp 443/tcp 80/tcp
+
+===== fail2ban =====
+  [PASS] Service                active
+  [PASS] sshd jail              enabled (currently banned: 3)
+
+===== Audit result =====
+  PASS: 14   WARN: 1   FAIL: 0
+```
+
+The exit code reflects the worst finding, so you can wire it into monitoring:
+
+| Exit | Meaning |
+|------|---------|
+| `0`  | all checks passed |
+| `1`  | passed with warnings |
+| `2`  | one or more critical checks failed |
+
+> Run the audit as **root** to let it read the live `sshd` config and
+> `fail2ban`. Without root it still runs, but a few checks downgrade to `WARN`.
 
 ---
 
@@ -92,6 +155,7 @@ Settings can come from three places (later wins):
 
 ```bash
 NEW_USER=deploy SSH_PORT=2222 INSTALL_DOCKER=true \
+  INSTALL_NODE=true NODE_VERSION=20 INSTALL_MONITORING=netdata \
   SSH_PUBKEY="ssh-ed25519 AAAA... you@laptop" \
   sudo -E bash bootstrap.sh
 ```
@@ -109,16 +173,21 @@ Key variables:
 | `SWAP_SIZE` | `2G` | swap size (`0` = skip) |
 | `INSTALL_NGINX` / `INSTALL_CERTBOT` | `true` | web stack |
 | `INSTALL_DOCKER` | `false` | optional Docker CE |
+| `INSTALL_NODE` / `NODE_VERSION` | `false` / `20` | optional Node.js via NodeSource (pinned major) |
+| `INSTALL_MONITORING` | `""` | `netdata`, `glances`, or empty (off) |
 | `INSTALL_FAIL2BAN` | `true` | brute-force protection |
 | `ENABLE_UNATTENDED_UPGRADES` | `true` | automatic security updates |
+| `LOG_FILE` | `""` | append a colour-free transcript of the run here |
 
 ### CLI flags
 
 | Flag | Effect |
 |------|--------|
+| `--verify`, `--audit` | **read-only audit** — check state, change nothing (see above) |
 | `--dry-run` | print every action, change nothing |
 | `--yes`, `-y` | assume "yes" to all confirmations (non-interactive) |
 | `--config FILE` | load config overrides from `FILE` |
+| `--log FILE` | append a colour-free transcript of the run to `FILE` |
 | `--help`, `-h` | show usage |
 
 ---
@@ -139,10 +208,19 @@ through your provider's web console/VNC.
    ```
 3. Only when that second login **and** `sudo` work, close the first session.
 
-The script helps you here: it validates the SSH config with `sshd -t` before
-reloading, refuses to disable passwords when the user has no key, and asks for
-an explicit confirmation before applying SSH hardening. But the final
-"test a second session" step is **on you** — do it.
+The script helps you at every lock-out-prone step:
+
+- It **validates** the SSH config with `sshd -t` and refuses to reload a broken
+  one.
+- It **refuses to disable passwords** when the new user has no SSH key.
+- It asks for an explicit confirmation before applying SSH hardening, and a
+  **second, separate confirmation** specifically before going key-only.
+- If you move SSH to a non-standard port, it **opens that port in UFW first**,
+  before telling `sshd` to switch — so the next login is never firewalled out.
+- After reloading SSH it prints the exact `ssh -p <port> user@host` command to
+  test from a second terminal.
+
+But the final "test a second session" step is **on you** — do it.
 
 > Changed `SSH_PORT`? Also make sure your **provider's cloud firewall** (AWS
 > security group, Hetzner/DO firewall, etc.) allows the new port — UFW is not
@@ -151,6 +229,14 @@ an explicit confirmation before applying SSH hardening. But the final
 ---
 
 ## What to verify afterwards
+
+The fastest check is the built-in audit, which rolls up everything below:
+
+```bash
+sudo bash bootstrap.sh --verify     # or: sudo bash harden-check.sh
+```
+
+To inspect things by hand:
 
 ```bash
 # SSH: key-only login as the new user works (from a second terminal)
@@ -184,14 +270,39 @@ sudo sshd -T | grep -Ei 'permitrootlogin|passwordauthentication|^port'
 
 ```
 vps-bootstrap/
-├── bootstrap.sh                       # the main script
+├── bootstrap.sh                       # the main script (setup + --verify audit)
+├── harden-check.sh                    # tiny wrapper -> bootstrap.sh --verify
 ├── bootstrap.conf.example             # copy to bootstrap.conf and edit
-├── README.md
+├── README.md                          # this file (English)
+├── README.ru.md                       # Russian translation
 ├── .gitignore
-└── templates/
-    ├── nginx-site.conf.template       # static-site / reverse-proxy starter
-    └── fail2ban-sshd.local            # reference sshd jail
+├── templates/
+│   ├── nginx-site.conf.template       # static-site / reverse-proxy starter
+│   └── fail2ban-sshd.local            # reference sshd jail
+└── tests/
+    └── run-tests.sh                   # dependency-free test suite
 ```
+
+---
+
+## Tests
+
+The project ships a small, **dependency-free** test suite (pure bash, no host
+required). It `bash -n`-checks every script, runs `shellcheck` when available,
+and unit-tests the pure helper functions (size parsing, the audit counters, the
+SSH-key safety predicate, `NODE_VERSION` validation, the confirm gate):
+
+```bash
+bash tests/run-tests.sh
+```
+
+```
+== result: 18 passed, 0 failed ==
+```
+
+`bootstrap.sh` only runs `main` when executed directly (`if [[ "${BASH_SOURCE[0]}"
+== "${0}" ]]`), so the tests can source it and exercise individual functions in
+isolation without touching the system.
 
 ---
 
@@ -210,6 +321,12 @@ vps-bootstrap/
 - **Ordering for safety.** The user + key are created, and the firewall opens
   SSH, *before* SSH hardening runs — so password auth can never be disabled
   before a working key path exists.
+- **Audit mode shares the source of truth.** `--verify` reads the live system
+  with `sshd -T`, `ufw status`, `fail2ban-client`, `swapon` and `sysctl` rather
+  than re-parsing files, so it reports what the kernel/daemons *actually* do.
+  It is strictly read-only and never requires `--yes`.
+- **Sourcing guard for testability.** `main` only runs when the script is
+  executed directly, letting the test suite source it and unit-test helpers.
 
 ---
 

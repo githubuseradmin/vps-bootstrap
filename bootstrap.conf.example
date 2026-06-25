@@ -54,5 +54,19 @@ INSTALL_DOCKER="${INSTALL_DOCKER:-false}"
 INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-true}"
 ENABLE_UNATTENDED_UPGRADES="${ENABLE_UNATTENDED_UPGRADES:-true}"
 
+# Node.js from the official NodeSource apt repo. Set INSTALL_NODE=true and pick
+# a major line in NODE_VERSION (e.g. 18, 20, 22).
+INSTALL_NODE="${INSTALL_NODE:-false}"
+NODE_VERSION="${NODE_VERSION:-20}"
+
+# Lightweight monitoring agent: "netdata" (local dashboard on 127.0.0.1:19999,
+# reach it over an SSH tunnel — NOT opened in UFW), "glances" (apt), or "" off.
+INSTALL_MONITORING="${INSTALL_MONITORING:-}"
+
 # Extra apt packages always installed (space-separated).
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-curl wget git vim htop ca-certificates gnupg}"
+
+# --- Logging ---------------------------------------------------------------
+# Append a colour-free transcript of the run to this file (empty = console only).
+# You can also pass --log <file> on the command line.
+# LOG_FILE="${LOG_FILE:-/var/log/vps-bootstrap.log}"

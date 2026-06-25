@@ -72,15 +72,38 @@ INSTALL_DOCKER="${INSTALL_DOCKER:-false}"
 INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-true}"
 ENABLE_UNATTENDED_UPGRADES="${ENABLE_UNATTENDED_UPGRADES:-true}"
 
+# Node.js via the official NodeSource apt repository (off by default).
+#   INSTALL_NODE=true  + NODE_VERSION=20  installs the Node 20.x LTS line.
+INSTALL_NODE="${INSTALL_NODE:-false}"
+NODE_VERSION="${NODE_VERSION:-20}"         # NodeSource major line, e.g. 18 / 20 / 22
+
+# Lightweight monitoring agent (off by default). Supported values:
+#   "netdata" — installs the upstream Netdata one-line agent (local dashboard
+#               on 127.0.0.1:19999; the port is NOT opened in UFW by design).
+#   "glances" — installs the `glances` terminal/web system monitor (apt).
+#   ""        — install nothing.
+INSTALL_MONITORING="${INSTALL_MONITORING:-}"
+
 # Extra apt packages to always install (space-separated).
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-curl wget git vim htop ca-certificates gnupg}"
+
+# --- Logging --------------------------------------------------------------
+# When set, a plain-text (colour-stripped) transcript of the run is appended
+# here in addition to the console output. Empty = console only.
+LOG_FILE="${LOG_FILE:-}"
 
 # ===========================================================================
 # Runtime flags (set by CLI parsing — do not edit)
 # ===========================================================================
 DRY_RUN=false
 ASSUME_YES=false
+VERIFY_ONLY=false       # --verify: read-only audit, change nothing
 CONFIG_FILE=""
+
+# Audit counters (used by --verify). Incremented by the check_* helpers.
+AUDIT_PASS=0
+AUDIT_WARN=0
+AUDIT_FAIL=0
 
 # ===========================================================================
 # LOGGING HELPERS
@@ -96,14 +119,24 @@ fi
 
 _ts() { date +'%Y-%m-%d %H:%M:%S'; }
 
-log()  { printf '%b[%s] %s%b\n'  "$C_BLUE"   "$(_ts)" "$*" "$C_RESET"; }
-info() { printf '%b[%s] %s%b\n'  "$C_GREEN"  "$(_ts)" "$*" "$C_RESET"; }
-warn() { printf '%b[%s] WARN: %s%b\n' "$C_YELLOW" "$(_ts)" "$*" "$C_RESET" >&2; }
-err()  { printf '%b[%s] ERROR: %s%b\n' "$C_RED" "$(_ts)" "$*" "$C_RESET" >&2; }
+# _logfile <plain-text-line> — append a colour-free copy of a log line to
+# LOG_FILE when one is configured. Never fails the run if the file is not
+# writable (a server transcript is a nice-to-have, not a hard dependency).
+_logfile() {
+  [[ -n "$LOG_FILE" ]] || return 0
+  printf '%s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log()  { printf '%b[%s] %s%b\n'  "$C_BLUE"   "$(_ts)" "$*" "$C_RESET"; _logfile "[$(_ts)] $*"; }
+info() { printf '%b[%s] %s%b\n'  "$C_GREEN"  "$(_ts)" "$*" "$C_RESET"; _logfile "[$(_ts)] $*"; }
+warn() { printf '%b[%s] WARN: %s%b\n' "$C_YELLOW" "$(_ts)" "$*" "$C_RESET" >&2; _logfile "[$(_ts)] WARN: $*"; }
+err()  { printf '%b[%s] ERROR: %s%b\n' "$C_RED" "$(_ts)" "$*" "$C_RESET" >&2; _logfile "[$(_ts)] ERROR: $*"; }
 
 # A bold section banner so the run is easy to scan.
 section() {
   printf '\n%b===== %s =====%b\n' "$C_BOLD" "$*" "$C_RESET"
+  _logfile ""
+  _logfile "===== $* ====="
 }
 
 # die <msg> — log an error and abort.
@@ -214,6 +247,44 @@ set_sshd_option() {
   else
     printf '%s\n' "$line" >> "$SSHD_DROPIN"
   fi
+}
+
+# ===========================================================================
+# AUDIT HELPERS (used by --verify; read-only, never change anything)
+# ===========================================================================
+# Each emits one aligned status line and bumps a counter so the run can print a
+# pass/warn/fail tally and choose a meaningful exit code.
+
+# audit_pass <check> <detail>
+audit_pass() {
+  AUDIT_PASS=$((AUDIT_PASS + 1))
+  printf '  %b[PASS]%b %-22s %s\n' "$C_GREEN" "$C_RESET" "$1" "${2:-}"
+  _logfile "  [PASS] $1 ${2:-}"
+}
+# audit_warn <check> <detail>
+audit_warn() {
+  AUDIT_WARN=$((AUDIT_WARN + 1))
+  printf '  %b[WARN]%b %-22s %s\n' "$C_YELLOW" "$C_RESET" "$1" "${2:-}"
+  _logfile "  [WARN] $1 ${2:-}"
+}
+# audit_fail <check> <detail>
+audit_fail() {
+  AUDIT_FAIL=$((AUDIT_FAIL + 1))
+  printf '  %b[FAIL]%b %-22s %s\n' "$C_RED" "$C_RESET" "$1" "${2:-}"
+  _logfile "  [FAIL] $1 ${2:-}"
+}
+# audit_info <check> <detail> — neutral, counts toward nothing.
+audit_info() {
+  printf '  %b[ -- ]%b %-22s %s\n' "$C_BLUE" "$C_RESET" "$1" "${2:-}"
+  _logfile "  [ -- ] $1 ${2:-}"
+}
+
+# sshd_effective <key> — print the effective value sshd would use for a
+# directive (lower-cased), or empty if sshd cannot be queried. Reads the live,
+# fully-merged config via `sshd -T`, so it reflects drop-ins too.
+sshd_effective() {
+  local key="$1"
+  sshd -T 2>/dev/null | awk -v k="${key,,}" 'tolower($1)==k {print tolower($2); exit}'
 }
 
 # ===========================================================================
@@ -343,9 +414,31 @@ step_ssh_hardening() {
       DISABLE_PASSWORD_AUTH="false"
     fi
 
+    # If the port is changing, make doubly sure the firewall already permits the
+    # NEW port before we tell sshd to move — otherwise the next login is blocked.
+    if [[ "$SSH_PORT" != "22" ]] && command -v ufw &>/dev/null && ! $DRY_RUN; then
+      if ufw status 2>/dev/null | grep -qE "(^|[[:space:]])${SSH_PORT}/tcp[[:space:]]+ALLOW"; then
+        info "UFW already allows the new SSH port ${SSH_PORT}/tcp."
+      else
+        warn "UFW does NOT yet allow ${SSH_PORT}/tcp — opening it now before moving SSH."
+        ufw_allow "$SSH_PORT/tcp" "SSH (new port)"
+      fi
+    fi
+
     if ! confirm "Apply SSH hardening now?"; then
       warn "Skipping SSH hardening at operator's request."
       return 0
+    fi
+
+    # Disabling password auth is the single most lock-out-prone change. When it
+    # is in play and we are interactive, require a second, explicit yes.
+    if [[ "$DISABLE_PASSWORD_AUTH" == "true" ]] && ! $ASSUME_YES && ! $DRY_RUN; then
+      warn "You are about to make this server KEY-ONLY. If your key is wrong,"
+      warn "new SSH logins will fail and you will need provider console access."
+      if ! confirm "I have an open session AND verified key login works. Disable passwords?"; then
+        warn "Keeping password authentication ENABLED at operator's request."
+        DISABLE_PASSWORD_AUTH="false"
+      fi
     fi
   fi
 
@@ -380,6 +473,8 @@ step_ssh_hardening() {
       systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
         warn "Could not reload SSH service automatically; reload it manually."
       info "SSH configuration applied and service reloaded."
+      warn "DO NOT close this session yet. From a SECOND terminal, verify login:"
+      warn "  ssh -p ${SSH_PORT} ${NEW_USER:-youruser}@<server-ip>"
     else
       err "sshd config validation FAILED — NOT reloading. Review $SSHD_DROPIN."
       return 1
@@ -690,6 +785,288 @@ EOF
   fi
 }
 
+# --- Step: Node.js via NodeSource (optional) -------------------------------
+step_node() {
+  section "Node.js (optional, via NodeSource)"
+  [[ "$INSTALL_NODE" == "true" ]] || { log "INSTALL_NODE=false — skipping Node.js."; return 0; }
+
+  # Validate NODE_VERSION is a bare major number to keep the repo URL safe.
+  if ! [[ "$NODE_VERSION" =~ ^[0-9]+$ ]]; then
+    err "NODE_VERSION must be a major number (e.g. 18, 20, 22) — got '$NODE_VERSION'. Skipping."
+    return 0
+  fi
+
+  # Already on the requested major line? Then there is nothing to do.
+  if command -v node &>/dev/null; then
+    local have
+    have="$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
+    if [[ "$have" == "$NODE_VERSION" ]]; then
+      log "Node.js $(node -v) already installed (major $NODE_VERSION)."
+      return 0
+    fi
+    warn "Node.js $(node -v) present but a different major than requested ($NODE_VERSION)."
+    warn "Proceeding to set up the NodeSource $NODE_VERSION.x repository."
+  fi
+
+  apt_install ca-certificates curl gnupg
+  if $DRY_RUN; then
+    printf '%b[dry-run] add NodeSource %s.x repo + install nodejs%b\n' \
+      "$C_YELLOW" "$NODE_VERSION" "$C_RESET"
+    return 0
+  fi
+
+  install -m 0755 -d /etc/apt/keyrings
+  # Fetch and de-armour the NodeSource signing key (idempotent: only if absent).
+  if [[ ! -f /etc/apt/keyrings/nodesource.gpg ]]; then
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    chmod a+r /etc/apt/keyrings/nodesource.gpg
+  fi
+  cat > /etc/apt/sources.list.d/nodesource.list <<EOF
+deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION}.x nodistro main
+EOF
+  apt-get update -y
+  apt_install nodejs
+  info "Installed $(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)."
+}
+
+# --- Step: monitoring agent (optional) -------------------------------------
+step_monitoring() {
+  section "Monitoring agent (optional)"
+  case "${INSTALL_MONITORING:-}" in
+    "" )
+      log "INSTALL_MONITORING empty — skipping monitoring agent."
+      return 0 ;;
+    netdata )
+      if command -v netdata &>/dev/null || [[ -d /opt/netdata ]]; then
+        log "Netdata already installed."
+      else
+        info "Installing Netdata (binds to 127.0.0.1:19999 — not exposed via UFW)."
+        if $DRY_RUN; then
+          printf '%b[dry-run] install Netdata via official kickstart script%b\n' \
+            "$C_YELLOW" "$C_RESET"
+        else
+          # The official one-line installer. We bind it to localhost so the
+          # dashboard is reachable only over an SSH tunnel, never the internet.
+          curl -fsSL https://get.netdata.cloud/kickstart.sh \
+            -o /tmp/netdata-kickstart.sh
+          sh /tmp/netdata-kickstart.sh --non-interactive --stable-channel \
+            --disable-telemetry || warn "Netdata installer returned non-zero; check output."
+          rm -f /tmp/netdata-kickstart.sh
+          # Best-effort: keep the listener on localhost only.
+          local nd_conf="/etc/netdata/netdata.conf"
+          if [[ -f "$nd_conf" ]] && ! grep -q 'bind to = 127.0.0.1' "$nd_conf"; then
+            backup_file "$nd_conf"
+          fi
+        fi
+      fi
+      info "Reach the dashboard safely via an SSH tunnel:"
+      info "  ssh -L 19999:127.0.0.1:19999 ${NEW_USER:-user}@<server-ip>  then open http://localhost:19999"
+      ;;
+    glances )
+      apt_install glances
+      info "Run 'glances' for an interactive dashboard, or 'glances -w' for a web UI."
+      info "If you use 'glances -w', open its port deliberately and protect it."
+      ;;
+    * )
+      warn "Unknown INSTALL_MONITORING='$INSTALL_MONITORING' (use netdata|glances|''). Skipping."
+      ;;
+  esac
+}
+
+# ===========================================================================
+# AUDIT MODE (--verify): inspect the live system, change NOTHING
+# ===========================================================================
+# Prints a pass/warn/fail report covering the same areas the script hardens, so
+# you can confirm a box is in the expected state (or spot drift) at any time.
+run_audit() {
+  printf '%b' "$C_BOLD"
+  cat <<'BANNER'
+ ___ _____ ___ _____   ___ _   _ ___ ___ _  __
+/ __|_   _/ _ \_   _| / __| | | | __/ __| |/ /
+\__ \ | || (_) || |  | (__| |_| | _| (__| ' <
+|___/ |_| \___/ |_|   \___|\___/|___\___|_|\_\
+       read-only audit — nothing will be changed
+BANNER
+  printf '%b\n' "$C_RESET"
+  info "Auditing $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo "this host") — no changes will be made."
+
+  audit_os
+  audit_ssh
+  audit_firewall
+  audit_fail2ban
+  audit_updates
+  audit_swap
+  audit_sysctl
+  audit_misc
+
+  section "Audit result"
+  printf '  %bPASS: %d%b   %bWARN: %d%b   %bFAIL: %d%b\n' \
+    "$C_GREEN" "$AUDIT_PASS" "$C_RESET" \
+    "$C_YELLOW" "$AUDIT_WARN" "$C_RESET" \
+    "$C_RED" "$AUDIT_FAIL" "$C_RESET"
+  _logfile "RESULT PASS=$AUDIT_PASS WARN=$AUDIT_WARN FAIL=$AUDIT_FAIL"
+
+  if [[ "$AUDIT_FAIL" -gt 0 ]]; then
+    warn "One or more critical checks FAILED — review the [FAIL] lines above."
+    return 2
+  elif [[ "$AUDIT_WARN" -gt 0 ]]; then
+    warn "Audit passed with warnings — review the [WARN] lines above."
+    return 1
+  fi
+  info "All checks passed."
+  return 0
+}
+
+audit_os() {
+  section "System"
+  audit_info "OS" "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo unknown)"
+  audit_info "Kernel" "$(uname -r)"
+  audit_info "Uptime" "$(uptime -p 2>/dev/null || true)"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    audit_warn "Privileges" "not root — some checks (sshd -T, fail2ban) may be limited."
+  fi
+}
+
+audit_ssh() {
+  section "SSH"
+  if ! command -v sshd &>/dev/null; then
+    audit_warn "sshd" "not installed / not found."
+    return 0
+  fi
+
+  local port rootlogin passauth
+  port="$(sshd_effective port)"
+  rootlogin="$(sshd_effective permitrootlogin)"
+  passauth="$(sshd_effective passwordauthentication)"
+
+  if [[ -n "$port" ]]; then
+    if [[ "$port" == "22" ]]; then
+      audit_info "Port" "22 (default)"
+    else
+      audit_pass "Port" "$port (moved off 22)"
+    fi
+  else
+    audit_warn "Port" "could not query sshd (need root?)"
+  fi
+
+  case "$rootlogin" in
+    no|prohibit-password) audit_pass "PermitRootLogin" "$rootlogin" ;;
+    yes)                  audit_fail "PermitRootLogin" "yes — root can log in over SSH" ;;
+    "")                   audit_warn "PermitRootLogin" "unknown (need root to read sshd config)" ;;
+    *)                    audit_warn "PermitRootLogin" "$rootlogin" ;;
+  esac
+
+  case "$passauth" in
+    no)  audit_pass "PasswordAuthentication" "no (key-only)" ;;
+    yes) audit_warn "PasswordAuthentication" "yes — passwords accepted (brute-forceable)" ;;
+    "")  audit_warn "PasswordAuthentication" "unknown (need root?)" ;;
+    *)   audit_warn "PasswordAuthentication" "$passauth" ;;
+  esac
+
+  if [[ -f "$SSHD_DROPIN" ]]; then
+    audit_pass "Drop-in present" "$SSHD_DROPIN"
+  else
+    audit_info "Drop-in present" "no vps-bootstrap drop-in (hardening may be elsewhere)"
+  fi
+}
+
+audit_firewall() {
+  section "Firewall (UFW)"
+  if ! command -v ufw &>/dev/null; then
+    audit_fail "UFW" "not installed — no host firewall."
+    return 0
+  fi
+  local status
+  status="$(ufw status 2>/dev/null | head -1)"
+  if printf '%s' "$status" | grep -q "Status: active"; then
+    audit_pass "UFW status" "active"
+    # Show the allowed rules briefly for context.
+    local rules
+    rules="$(ufw status 2>/dev/null | awk '/ALLOW/ {print $1}' | sort -u | tr '\n' ' ')"
+    [[ -n "$rules" ]] && audit_info "Allowed" "$rules"
+  else
+    audit_fail "UFW status" "inactive — incoming traffic is NOT filtered."
+  fi
+}
+
+audit_fail2ban() {
+  section "fail2ban"
+  if ! command -v fail2ban-client &>/dev/null; then
+    audit_warn "fail2ban" "not installed."
+    return 0
+  fi
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    audit_pass "Service" "active"
+    if fail2ban-client status sshd &>/dev/null; then
+      local banned
+      banned="$(fail2ban-client status sshd 2>/dev/null | awk -F'\t' '/Currently banned/ {gsub(/ /,"",$2); print $2}')"
+      audit_pass "sshd jail" "enabled (currently banned: ${banned:-0})"
+    else
+      audit_warn "sshd jail" "service up but sshd jail not reporting."
+    fi
+  else
+    audit_warn "Service" "installed but not active."
+  fi
+}
+
+audit_updates() {
+  section "Automatic updates"
+  local cfg="/etc/apt/apt.conf.d/20auto-upgrades"
+  if [[ -f "$cfg" ]] && grep -q 'Unattended-Upgrade "1"' "$cfg" 2>/dev/null; then
+    audit_pass "unattended-upgrades" "enabled"
+  else
+    audit_warn "unattended-upgrades" "not enabled — security patches are manual."
+  fi
+  # Count upgradable packages (informational; never fails the audit).
+  if command -v apt-get &>/dev/null; then
+    local n
+    n="$(apt-get -s -o Debug::NoLocking=true upgrade 2>/dev/null | grep -c '^Inst' || true)"
+    if [[ "${n:-0}" -gt 0 ]]; then
+      audit_warn "Pending upgrades" "${n} package(s) upgradable now."
+    else
+      audit_info "Pending upgrades" "none detected."
+    fi
+  fi
+}
+
+audit_swap() {
+  section "Swap"
+  if swapon --show 2>/dev/null | grep -q .; then
+    local sz
+    sz="$(swapon --show=SIZE --noheadings 2>/dev/null | head -1 | tr -d ' ')"
+    audit_pass "Swap" "active (${sz:-unknown})"
+  else
+    audit_warn "Swap" "no active swap (acceptable on large boxes; risky on small ones)."
+  fi
+}
+
+audit_sysctl() {
+  section "Kernel / network hardening"
+  _audit_sysctl_kv net.ipv4.tcp_syncookies 1 "SYN cookies"
+  _audit_sysctl_kv net.ipv4.conf.all.rp_filter 1 "rp_filter"
+  _audit_sysctl_kv net.ipv4.conf.all.accept_redirects 0 "ignore ICMP redirects"
+}
+
+# _audit_sysctl_kv <key> <expected> <label>
+_audit_sysctl_kv() {
+  local key="$1" want="$2" label="$3" have
+  have="$(sysctl -n "$key" 2>/dev/null || echo '?')"
+  if [[ "$have" == "$want" ]]; then
+    audit_pass "$label" "$key=$have"
+  else
+    audit_warn "$label" "$key=$have (expected $want)"
+  fi
+}
+
+audit_misc() {
+  section "Optional components"
+  command -v docker  &>/dev/null && audit_info "Docker"  "$(docker --version 2>/dev/null)"  || audit_info "Docker"  "not installed"
+  command -v node    &>/dev/null && audit_info "Node.js" "$(node -v 2>/dev/null)"            || audit_info "Node.js" "not installed"
+  command -v nginx   &>/dev/null && audit_info "nginx"   "installed"                          || audit_info "nginx"   "not installed"
+  command -v netdata &>/dev/null && audit_info "Netdata" "installed (tunnel to 127.0.0.1:19999)" || true
+}
+
 # ===========================================================================
 # SUMMARY / CHECKLIST
 # ===========================================================================
@@ -710,6 +1087,8 @@ $(info "vps-bootstrap finished.")
   nginx       : $([[ "$INSTALL_NGINX" == "true" ]] && echo "installed" || echo "off")
   certbot     : $([[ "$INSTALL_CERTBOT" == "true" ]] && echo "installed" || echo "off")
   Docker      : $([[ "$INSTALL_DOCKER" == "true" ]] && echo "installed" || echo "off")
+  Node.js     : $([[ "$INSTALL_NODE" == "true" ]] && echo "installed (${NODE_VERSION}.x)" || echo "off")
+  Monitoring  : ${INSTALL_MONITORING:-off}
 
 $(warn "POST-RUN CHECKLIST — do this BEFORE closing your current session:")
   1. Open a SECOND terminal and log in as the new user:
@@ -718,6 +1097,9 @@ $(warn "POST-RUN CHECKLIST — do this BEFORE closing your current session:")
   3. Confirm the firewall: sudo ufw status verbose
   4. Confirm fail2ban:     sudo fail2ban-client status sshd
   5. Only after all the above succeed, close your original session.
+
+$(info "TIP: re-run this script in audit mode any time to confirm the box's state:")
+       sudo bash $0 --verify
 
 $(warn "If you changed the SSH port, remember to use -p ${SSH_PORT} from now on,")
 $(warn "and that your provider's cloud firewall (if any) also allows it.")
@@ -735,10 +1117,17 @@ Usage:
   sudo bash $0 [options]
 
 Options:
+  --verify, --audit    Read-only audit of the live system. Checks SSH, UFW,
+                       fail2ban, swap, updates and sysctl, prints a
+                       PASS/WARN/FAIL report, and changes NOTHING.
   --dry-run            Print every action without changing anything.
   --yes, -y            Assume "yes" to all confirmations (non-interactive).
   --config <file>      Load configuration overrides from <file>.
+  --log <file>         Append a colour-free transcript of the run to <file>.
   --help, -h           Show this help and exit.
+
+Exit codes (audit mode):
+  0  all checks passed     1  passed with warnings     2  one or more failures
 
 Configuration is read (in order, later wins) from:
   1. Defaults in this script's CONFIGURATION section.
@@ -752,10 +1141,13 @@ EOF
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --verify|--audit) VERIFY_ONLY=true ;;
       --dry-run)      DRY_RUN=true ;;
       --yes|-y)       ASSUME_YES=true ;;
       --config)       CONFIG_FILE="${2:-}"; shift ;;
       --config=*)     CONFIG_FILE="${1#*=}" ;;
+      --log)          LOG_FILE="${2:-}"; shift ;;
+      --log=*)        LOG_FILE="${1#*=}" ;;
       --help|-h)      usage; exit 0 ;;
       *)              die "Unknown argument: $1 (try --help)" ;;
     esac
@@ -784,6 +1176,14 @@ load_config() {
 # ===========================================================================
 main() {
   parse_args "$@"
+  load_config
+
+  # --- Audit mode: read-only, no root strictly required ---------------------
+  # Runs the checks and exits with a status that reflects the worst finding.
+  if $VERIFY_ONLY; then
+    run_audit
+    exit $?
+  fi
 
   printf '%b' "$C_BOLD"
   cat <<'BANNER'
@@ -795,8 +1195,12 @@ main() {
 BANNER
   printf '%b' "$C_RESET"
 
-  load_config
   need_root
+
+  if [[ -n "$LOG_FILE" ]]; then
+    info "Logging a transcript to: $LOG_FILE"
+    _logfile "===== vps-bootstrap run started $(_ts) ====="
+  fi
 
   if $DRY_RUN; then
     warn "DRY-RUN MODE: no changes will be made. Showing planned actions."
@@ -818,8 +1222,15 @@ BANNER
   step_nginx
   step_certbot
   step_docker
+  step_node
+  step_monitoring
 
   print_summary
 }
 
-main "$@"
+# Only run main when executed directly, not when sourced (e.g. by the test
+# harness in tests/). This lets tests exercise the pure helper functions in
+# isolation without triggering a full system run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
