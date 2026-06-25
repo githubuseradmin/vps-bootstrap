@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# nginx site template — vps-bootstrap
+# ---------------------------------------------------------------------------
+# A sensible starting point for a single site / reverse proxy.
+#
+# Usage:
+#   1. Copy and replace the placeholders:
+#        sed 's/__DOMAIN__/example.com/; s#__ROOT__#/var/www/example.com#' \
+#          templates/nginx-site.conf.template \
+#          | sudo tee /etc/nginx/sites-available/example.com
+#   2. Enable it:
+#        sudo ln -s /etc/nginx/sites-available/example.com \
+#                   /etc/nginx/sites-enabled/example.com
+#   3. Test & reload:
+#        sudo nginx -t && sudo systemctl reload nginx
+#   4. Get HTTPS (rewrites this file to add the 443 block automatically):
+#        sudo certbot --nginx -d example.com -d www.example.com
+# ---------------------------------------------------------------------------
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__ www.__DOMAIN__;
+
+    # --- Option A: serve static files -------------------------------------
+    root __ROOT__;
+    index index.html index.htm;
+
+    # Let certbot's ACME HTTP-01 challenge through before any redirect.
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # --- Option B: reverse proxy to an app on localhost:3000 --------------
+    # Comment out the `location /` block above and use this instead.
+    #
+    # location / {
+    #     proxy_pass         http://127.0.0.1:3000;
+    #     proxy_http_version 1.1;
+    #     proxy_set_header   Host              $host;
+    #     proxy_set_header   X-Real-IP         $remote_addr;
+    #     proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    #     proxy_set_header   X-Forwarded-Proto $scheme;
+    #     proxy_set_header   Upgrade           $http_upgrade;
+    #     proxy_set_header   Connection        "upgrade";
+    # }
+
+    # --- Security headers --------------------------------------------------
+    add_header X-Frame-Options        "SAMEORIGIN"        always;
+    add_header X-Content-Type-Options "nosniff"           always;
+    add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+
+    # Hide nginx version in error pages / Server header.
+    server_tokens off;
+
+    # Basic gzip for text assets.
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+    gzip_min_length 1024;
+
+    access_log /var/log/nginx/__DOMAIN__.access.log;
+    error_log  /var/log/nginx/__DOMAIN__.error.log;
+}

@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# fail2ban jail snippet — vps-bootstrap
+# ---------------------------------------------------------------------------
+# Drop this in /etc/fail2ban/jail.d/ as a *.local file so it survives package
+# upgrades (fail2ban never overwrites .local files). bootstrap.sh writes an
+# equivalent file automatically; this standalone copy is here for reference
+# and for manual tuning.
+#
+# Install manually:
+#   sudo cp templates/fail2ban-sshd.local /etc/fail2ban/jail.d/vps-bootstrap.local
+#   sudo systemctl restart fail2ban
+#   sudo fail2ban-client status sshd
+# ---------------------------------------------------------------------------
+
+[DEFAULT]
+# How long an offending IP is banned.
+bantime  = 1h
+# Window in which `maxretry` failures trigger a ban.
+findtime = 10m
+# Failures allowed before a ban.
+maxretry = 5
+# Read logs from the systemd journal (modern Ubuntu/Debian default).
+backend  = systemd
+
+# Optionally never ban your own admin IPs (uncomment and edit):
+# ignoreip = 127.0.0.1/8 ::1 203.0.113.7
+
+[sshd]
+enabled = true
+# If you moved SSH off 22, set the matching port here.
+port    = 22

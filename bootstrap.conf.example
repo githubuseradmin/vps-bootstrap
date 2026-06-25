@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# vps-bootstrap — example configuration
+# ---------------------------------------------------------------------------
+# Copy this file to `bootstrap.conf` (which is git-ignored) and edit it:
+#
+#     cp bootstrap.conf.example bootstrap.conf
+#     $EDITOR bootstrap.conf
+#     sudo bash bootstrap.sh           # auto-loads ./bootstrap.conf
+#     # or: sudo bash bootstrap.sh --config /path/to/bootstrap.conf
+#
+# Each line uses the `VAR="${VAR:-value}"` idiom so that an environment
+# variable set on the command line still wins over the file. Uncomment and
+# change only what you need; anything left commented keeps the script default.
+# ---------------------------------------------------------------------------
+
+# --- Identity --------------------------------------------------------------
+# The non-root sudo user to create. Set to "" to skip user creation entirely.
+NEW_USER="${NEW_USER:-deploy}"
+
+# Your SSH PUBLIC key (the .pub file's contents). Use ONE of the two options.
+# NEVER put a private key here. Public keys are safe to commit/share.
+#
+# Option A — paste the key literally:
+# SSH_PUBKEY="${SSH_PUBKEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... you@laptop}"
+#
+# Option B — point to a file containing one or more public keys:
+# SSH_PUBKEY_FILE="${SSH_PUBKEY_FILE:-/root/deploy_key.pub}"
+#
+# If both are empty, the script copies root's existing authorized_keys.
+
+# --- SSH -------------------------------------------------------------------
+# Keep 22 unless you have a reason to move it. If you change it, your provider's
+# cloud firewall (if any) must also allow the new port.
+SSH_PORT="${SSH_PORT:-22}"
+DISABLE_ROOT_LOGIN="${DISABLE_ROOT_LOGIN:-true}"
+DISABLE_PASSWORD_AUTH="${DISABLE_PASSWORD_AUTH:-true}"
+
+# --- Localisation ----------------------------------------------------------
+TIMEZONE="${TIMEZONE:-UTC}"             # e.g. Europe/Minsk, America/New_York
+LOCALE="${LOCALE:-en_US.UTF-8}"
+
+# --- Firewall --------------------------------------------------------------
+ALLOW_HTTP="${ALLOW_HTTP:-true}"        # open 80/tcp
+ALLOW_HTTPS="${ALLOW_HTTPS:-true}"      # open 443/tcp
+
+# --- Swap ------------------------------------------------------------------
+# Created only if the box has no swap yet. Set "0" to skip.
+SWAP_SIZE="${SWAP_SIZE:-2G}"
+
+# --- Optional components ---------------------------------------------------
+INSTALL_NGINX="${INSTALL_NGINX:-true}"
+INSTALL_CERTBOT="${INSTALL_CERTBOT:-true}"
+INSTALL_DOCKER="${INSTALL_DOCKER:-false}"
+INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-true}"
+ENABLE_UNATTENDED_UPGRADES="${ENABLE_UNATTENDED_UPGRADES:-true}"
+
+# Extra apt packages always installed (space-separated).
+EXTRA_PACKAGES="${EXTRA_PACKAGES:-curl wget git vim htop ca-certificates gnupg}"
