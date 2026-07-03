@@ -54,7 +54,7 @@ SSH-ключ, и проводит вас через проверку второ�
 | 3 | **Swap** | создаёт swap-файл, если на сервере его нет | пропускает, если swap уже активен |
 | 4 | **Часовой пояс и локаль** | задаёт часовой пояс, генерирует локаль | пропускает, если уже настроено |
 | 5 | **Фаервол (UFW)** | запрет входящих, разрешение SSH / HTTP / HTTPS, включение | добавляет правило только при его отсутствии |
-| 6 | **Усиление SSH** | `PermitRootLogin no`, `PasswordAuthentication no`, опц. смена порта, разумные лимиты | пишет drop-in; проверяет `sshd -t` перед перезагрузкой |
+| 6 | **Усиление SSH** | `PermitRootLogin no`, `PasswordAuthentication no`, опц. смена порта, плюс жёсткие лимиты (`MaxAuthTries 3`, `LoginGraceTime 30`, отключение проброса X11/TCP, тайм-ауты простоя `ClientAlive*`) | пишет drop-in; проверяет `sshd -t` перед перезагрузкой |
 | 7 | **fail2ban** | установка + jail для `sshd` (бан после 5 неудач) | пропускает, если файл jail уже есть |
 | 8 | **Unattended-upgrades** | включает автоматические обновления безопасности | пропускает, если уже включено |
 | 9 | **Усиление sysctl** | SYN cookies, rp_filter, игнор ICMP redirects и т. д. | пропускает, если drop-in существует |
@@ -88,6 +88,12 @@ sudo bash harden-check.sh
   [PASS] Port                   2222 (moved off 22)
   [PASS] PermitRootLogin        no
   [PASS] PasswordAuthentication no (key-only)
+  [PASS] MaxAuthTries           3 — <=3 login attempts per connection
+  [PASS] LoginGraceTime         30 — auth must finish within 30s
+  [PASS] X11Forwarding          no — X11 forwarding disabled
+  [PASS] AllowTcpForwarding     no — TCP forwarding disabled
+  [PASS] ClientAliveInterval    300 — idle-session probe interval
+  [PASS] ClientAliveCountMax    2 — drop session after 2 missed probes
   [PASS] Drop-in present        /etc/ssh/sshd_config.d/99-vps-bootstrap.conf
 
 ===== Firewall (UFW) =====
@@ -301,14 +307,15 @@ vps-bootstrap/
 требуется). Он проверяет каждый скрипт через `bash -n`, запускает `shellcheck`,
 если он доступен, и юнит-тестирует чистые вспомогательные функции (разбор
 размеров, счётчики аудита, предикат безопасности SSH-ключа, валидацию
-`NODE_VERSION`, гейт подтверждения):
+`NODE_VERSION`, гейт подтверждения, идемпотентную запись `set_sshd_option` и
+проверки аудита через `sshd -T`):
 
 ```bash
 bash tests/run-tests.sh
 ```
 
 ```
-== result: 18 passed, 0 failed ==
+== result: 39 passed, 0 failed ==
 ```
 
 `bootstrap.sh` запускает `main` только при прямом выполнении (`if [[

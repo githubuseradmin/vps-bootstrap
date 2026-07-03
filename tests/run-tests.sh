@@ -133,6 +133,63 @@ ASSUME_YES=false; DRY_RUN=true
 assert_fail "confirm declines under --dry-run"  confirm "test prompt"
 ASSUME_YES=false; DRY_RUN=false
 
+# --- set_sshd_option: idempotently writes/updates directives in a drop-in ---
+# Point SSHD_DROPIN at a throwaway file and exercise the real writer. This is
+# pure text manipulation (no sshd / root needed), so it is safe on any host.
+DRY_RUN=false
+SSHD_DROPIN="$TMP_HOME/99-vps-bootstrap.conf"
+: > "$SSHD_DROPIN"
+set_sshd_option "MaxAuthTries" "3"
+set_sshd_option "AllowTcpForwarding" "no"
+set_sshd_option "X11Forwarding" "no"
+assert_cmd  "set_sshd_option writes MaxAuthTries 3" \
+  grep -qxE 'MaxAuthTries 3' "$SSHD_DROPIN"
+assert_cmd  "set_sshd_option writes AllowTcpForwarding no" \
+  grep -qxE 'AllowTcpForwarding no' "$SSHD_DROPIN"
+# Re-setting the same key must REPLACE, not append (idempotent, single line).
+set_sshd_option "MaxAuthTries" "3"
+assert_eq "1" "$(grep -cE '^MaxAuthTries ' "$SSHD_DROPIN")" \
+  "set_sshd_option is idempotent (no duplicate MaxAuthTries line)"
+# Changing the value updates the existing line in place.
+set_sshd_option "MaxAuthTries" "5"
+assert_eq "1" "$(grep -cE '^MaxAuthTries ' "$SSHD_DROPIN")" \
+  "set_sshd_option updates in place (still one MaxAuthTries line)"
+assert_cmd  "set_sshd_option applied the new value" \
+  grep -qxE 'MaxAuthTries 5' "$SSHD_DROPIN"
+
+# --- audit_sshd_expect: PASS on match, WARN on drift / unreadable ----------
+# Stub sshd_effective so we can drive the audit helper without a live sshd.
+# (bootstrap.sh's audit_sshd_expect calls sshd_effective, which we shadow.)
+_stub_val=""
+sshd_effective() { printf '%s' "$_stub_val"; }
+
+AUDIT_PASS=0; AUDIT_WARN=0; AUDIT_FAIL=0
+_stub_val="3"
+audit_sshd_expect "MaxAuthTries" "3" "attempts" >/dev/null
+assert_eq "1" "$AUDIT_PASS" "audit_sshd_expect PASSes when value matches"
+
+AUDIT_PASS=0; AUDIT_WARN=0; AUDIT_FAIL=0
+_stub_val="6"
+audit_sshd_expect "MaxAuthTries" "3" "attempts" >/dev/null
+assert_eq "1" "$AUDIT_WARN" "audit_sshd_expect WARNs on drift"
+assert_eq "0" "$AUDIT_FAIL" "audit_sshd_expect never FAILs (drift is a WARN)"
+
+AUDIT_PASS=0; AUDIT_WARN=0; AUDIT_FAIL=0
+_stub_val=""
+audit_sshd_expect "AllowTcpForwarding" "no" "forwarding" >/dev/null
+assert_eq "1" "$AUDIT_WARN" "audit_sshd_expect WARNs when value is unreadable"
+
+# --- the SSH step & audit reference the new hardening directives ------------
+# Guard against silent drift between what we WRITE and what we CHECK: both the
+# hardening step and the audit must mention each required directive by name.
+for _d in MaxAuthTries LoginGraceTime X11Forwarding AllowTcpForwarding \
+          ClientAliveInterval ClientAliveCountMax; do
+  assert_cmd "step_ssh_hardening sets $_d" \
+    grep -qE "set_sshd_option \"$_d\"" "$BOOTSTRAP"
+  assert_cmd "audit references $_d" \
+    grep -qE "audit_sshd_expect $_d" "$BOOTSTRAP"
+done
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

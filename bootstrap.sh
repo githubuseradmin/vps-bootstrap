@@ -287,6 +287,23 @@ sshd_effective() {
   sshd -T 2>/dev/null | awk -v k="${key,,}" 'tolower($1)==k {print tolower($2); exit}'
 }
 
+# audit_sshd_expect <Directive> <expected> <label> — compare the LIVE effective
+# value of an sshd directive (via sshd_effective / `sshd -T`) against the value
+# step_ssh_hardening writes. PASS on an exact match, WARN on drift, and WARN
+# (not FAIL) when the value cannot be read — that usually just means the audit
+# is running without root, not that the box is misconfigured.
+audit_sshd_expect() {
+  local key="$1" want="${2,,}" label="$3" have
+  have="$(sshd_effective "$key")"
+  if [[ -z "$have" ]]; then
+    audit_warn "$key" "unknown (need root to read sshd config)"
+  elif [[ "$have" == "$want" ]]; then
+    audit_pass "$key" "$have — $label"
+  else
+    audit_warn "$key" "$have (expected $want) — $label"
+  fi
+}
+
 # ===========================================================================
 # STEP FUNCTIONS
 # ===========================================================================
@@ -444,12 +461,15 @@ step_ssh_hardening() {
 
   backup_file /etc/ssh/sshd_config
 
-  # Core hardening directives (always safe / recommended).
+  # Core hardening directives (always safe / recommended). None of these touch
+  # who may log in or how — they only tighten limits and disable forwarding —
+  # so they cannot lock the operator out on their own.
   set_sshd_option "Protocol" "2"
   set_sshd_option "PubkeyAuthentication" "yes"
   set_sshd_option "ChallengeResponseAuthentication" "no"
   set_sshd_option "X11Forwarding" "no"
-  set_sshd_option "MaxAuthTries" "4"
+  set_sshd_option "AllowTcpForwarding" "no"
+  set_sshd_option "MaxAuthTries" "3"
   set_sshd_option "LoginGraceTime" "30"
   set_sshd_option "ClientAliveInterval" "300"
   set_sshd_option "ClientAliveCountMax" "2"
@@ -963,6 +983,15 @@ audit_ssh() {
     "")  audit_warn "PasswordAuthentication" "unknown (need root?)" ;;
     *)   audit_warn "PasswordAuthentication" "$passauth" ;;
   esac
+
+  # Extra hardening directives applied by step_ssh_hardening. Read the LIVE,
+  # fully-merged daemon config via `sshd -T` so drop-ins are reflected.
+  audit_sshd_expect MaxAuthTries        "3"   "<=3 login attempts per connection"
+  audit_sshd_expect LoginGraceTime      "30"  "auth must finish within 30s"
+  audit_sshd_expect X11Forwarding       "no"  "X11 forwarding disabled"
+  audit_sshd_expect AllowTcpForwarding  "no"  "TCP forwarding disabled"
+  audit_sshd_expect ClientAliveInterval "300" "idle-session probe interval"
+  audit_sshd_expect ClientAliveCountMax "2"   "drop session after 2 missed probes"
 
   if [[ -f "$SSHD_DROPIN" ]]; then
     audit_pass "Drop-in present" "$SSHD_DROPIN"

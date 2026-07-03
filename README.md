@@ -51,7 +51,7 @@ Each step is a self-contained function and is **idempotent**:
 | 3 | **Swap** | create a swap file if the box has none | skips if any swap is active |
 | 4 | **Timezone & locale** | set timezone, generate locale | skips if already set |
 | 5 | **Firewall (UFW)** | deny incoming, allow SSH / HTTP / HTTPS, enable | adds a rule only if absent |
-| 6 | **SSH hardening** | `PermitRootLogin no`, `PasswordAuthentication no`, optional port change, sane limits | writes a drop-in; validates with `sshd -t` before reload |
+| 6 | **SSH hardening** | `PermitRootLogin no`, `PasswordAuthentication no`, optional port change, plus tight limits (`MaxAuthTries 3`, `LoginGraceTime 30`, no X11/TCP forwarding, `ClientAlive*` idle timeouts) | writes a drop-in; validates with `sshd -t` before reload |
 | 7 | **fail2ban** | install + `sshd` jail (ban after 5 fails) | skips if jail file exists |
 | 8 | **Unattended-upgrades** | enable automatic security updates | skips if already enabled |
 | 9 | **sysctl hardening** | SYN cookies, rp_filter, ignore ICMP redirects, etc. | skips if drop-in exists |
@@ -85,6 +85,12 @@ Example output:
   [PASS] Port                   2222 (moved off 22)
   [PASS] PermitRootLogin        no
   [PASS] PasswordAuthentication no (key-only)
+  [PASS] MaxAuthTries           3 — <=3 login attempts per connection
+  [PASS] LoginGraceTime         30 — auth must finish within 30s
+  [PASS] X11Forwarding          no — X11 forwarding disabled
+  [PASS] AllowTcpForwarding     no — TCP forwarding disabled
+  [PASS] ClientAliveInterval    300 — idle-session probe interval
+  [PASS] ClientAliveCountMax    2 — drop session after 2 missed probes
   [PASS] Drop-in present        /etc/ssh/sshd_config.d/99-vps-bootstrap.conf
 
 ===== Firewall (UFW) =====
@@ -290,14 +296,15 @@ vps-bootstrap/
 The project ships a small, **dependency-free** test suite (pure bash, no host
 required). It `bash -n`-checks every script, runs `shellcheck` when available,
 and unit-tests the pure helper functions (size parsing, the audit counters, the
-SSH-key safety predicate, `NODE_VERSION` validation, the confirm gate):
+SSH-key safety predicate, `NODE_VERSION` validation, the confirm gate, the
+idempotent `set_sshd_option` writer, and the `sshd -T` audit checks):
 
 ```bash
 bash tests/run-tests.sh
 ```
 
 ```
-== result: 18 passed, 0 failed ==
+== result: 39 passed, 0 failed ==
 ```
 
 `bootstrap.sh` only runs `main` when executed directly (`if [[ "${BASH_SOURCE[0]}"

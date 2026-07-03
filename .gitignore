@@ -7,6 +7,10 @@
 bootstrap.conf
 *.conf.local
 
+# Environment files — may hold secrets/tokens; never commit them.
+.env
+.env.*
+
 # SSH keys — never commit private keys. Public keys are technically safe,
 # but ignoring the whole set avoids accidents.
 *.pem
