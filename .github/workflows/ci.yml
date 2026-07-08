@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: shellcheck + test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Syntax-check every shell script (bash -n)
+        run: |
+          for f in ./*.sh ./tests/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      - name: Lint with shellcheck
+        run: shellcheck -S warning ./*.sh ./tests/*.sh
+
+      - name: Run test suite
+        run: bash tests/run-tests.sh

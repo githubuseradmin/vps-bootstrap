@@ -2,6 +2,16 @@
 
 # vps-bootstrap
 
+![CI](https://github.com/githubuseradmin/vps-bootstrap/actions/workflows/ci.yml/badge.svg)
+![tests](https://img.shields.io/badge/tests-39_passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue)
+![shell](https://img.shields.io/badge/shell-bash-4EAA25)
+
+**Один идемпотентный Bash-скрипт, который за считанные минуты защищает свежий
+Ubuntu/Debian VPS** — sudo-пользователь без root, вход по SSH только по ключу,
+фаервол, защита от перебора, автообновления безопасности и режим аудита
+(только чтение). Для тех, кто сам поднимает свои серверы.
+
 > Один идемпотентный Bash-скрипт, который приводит **свежий Ubuntu/Debian VPS**
 > от состояния «root по паролю на порту 22» к разумной, защищённой базовой
 > конфигурации — отдельный sudo-пользователь без root, вход по SSH только по

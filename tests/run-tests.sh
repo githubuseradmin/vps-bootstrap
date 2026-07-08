@@ -127,15 +127,19 @@ assert_fail "NODE_VERSION 20.x is rejected"     bash -c '[[ "20.x" =~ ^[0-9]+$ ]
 assert_fail "NODE_VERSION lts is rejected"      bash -c '[[ "lts" =~ ^[0-9]+$ ]]'
 
 # --- confirm: --yes auto-confirms, dry-run declines ------------------------
+# ASSUME_YES / DRY_RUN are read by confirm(), which is sourced from bootstrap.sh;
+# the linter cannot follow that cross-source use, hence the SC2034 suppressions.
 ASSUME_YES=true; DRY_RUN=false
 assert_cmd  "confirm returns yes under --yes"   confirm "test prompt"
 ASSUME_YES=false; DRY_RUN=true
 assert_fail "confirm declines under --dry-run"  confirm "test prompt"
+# shellcheck disable=SC2034
 ASSUME_YES=false; DRY_RUN=false
 
 # --- set_sshd_option: idempotently writes/updates directives in a drop-in ---
 # Point SSHD_DROPIN at a throwaway file and exercise the real writer. This is
 # pure text manipulation (no sshd / root needed), so it is safe on any host.
+# shellcheck disable=SC2034  # read by set_sshd_option() sourced from bootstrap.sh
 DRY_RUN=false
 SSHD_DROPIN="$TMP_HOME/99-vps-bootstrap.conf"
 : > "$SSHD_DROPIN"

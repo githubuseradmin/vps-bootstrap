@@ -219,7 +219,8 @@ apt_install() {
 backup_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
-  local bak="${f}.bak.$(date +%Y%m%d_%H%M%S)"
+  local bak
+  bak="${f}.bak.$(date +%Y%m%d_%H%M%S)"
   if $DRY_RUN; then
     printf '%b[dry-run] backup %s -> %s%b\n' "$C_YELLOW" "$f" "$bak" "$C_RESET"
   else

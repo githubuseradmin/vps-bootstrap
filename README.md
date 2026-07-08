@@ -2,6 +2,15 @@ English | [Русский](README.ru.md)
 
 # vps-bootstrap
 
+![CI](https://github.com/githubuseradmin/vps-bootstrap/actions/workflows/ci.yml/badge.svg)
+![tests](https://img.shields.io/badge/tests-39_passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue)
+![shell](https://img.shields.io/badge/shell-bash-4EAA25)
+
+**One idempotent Bash script that hardens a fresh Ubuntu/Debian VPS in minutes** —
+non-root sudo user, key-only SSH, firewall, brute-force protection, auto security
+updates, and a read-only audit mode. For anyone provisioning their own servers.
+
 > One idempotent Bash script to take a **fresh Ubuntu/Debian VPS** from
 > "root password over port 22" to a sane, hardened baseline — a non-root sudo
 > user, key-only SSH, a firewall, brute-force protection, automatic security
